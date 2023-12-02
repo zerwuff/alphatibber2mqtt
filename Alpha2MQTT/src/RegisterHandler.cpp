@@ -28,10 +28,6 @@ Default Constructor
 
 Initialisations and what not
 */
-RegisterHandler::RegisterHandler()
-{
-
-}
 
 /*
 Constructor which allows setting the RS485 class level variable

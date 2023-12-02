@@ -48,7 +48,6 @@ class RegisterHandler
 
 
 	public:
-		RegisterHandler();
 		RegisterHandler(RS485Handler* modBus);
 		~RegisterHandler();
 
@@ -62,4 +61,3 @@ class RegisterHandler
 
 
 #endif
-

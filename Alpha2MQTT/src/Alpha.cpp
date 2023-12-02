@@ -1,631 +1,44 @@
-/*
-Name:		Alpha2MQTT.ino
-Created:	8/24/2022
-Author:		Daniel Young
+#include "Alpha.h" 
 
-This file is part of Alpha2MQTT (A2M) which is released under GNU GENERAL PUBLIC LICENSE.
-See file LICENSE or go to https://choosealicense.com/licenses/gpl-3.0/ for full license details.
+	// Device parameters
+	static char _version[6] = "v1.24";
 
-Notes
+    // OLED variables
+    static char _oledOperatingIndicator = '*';
+    static char _oledLine2[OLED_CHARACTER_WIDTH] = "";
+    static char _oledLine3[OLED_CHARACTER_WIDTH] = "";	
+    static char _oledLine4[OLED_CHARACTER_WIDTH] = "";
 
-First, go and customise options at the top of Definitions.h!
-*/
 
-// Supporting files
-#include "RegisterHandler.h"
-#include "RS485Handler.h"
-#include "Definitions.h"
-#include <Arduino.h>
-#if defined MP_ESP8266
-#include <ESP8266WiFi.h>
-#elif defined MP_ESP32
-#include <WiFi.h>
-#endif
-#include <PubSubClient.h>
-#include <SPI.h>
-#include <Wire.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
+  // Buffer Size (and therefore payload size calc)
+    static int _maxPayloadSize;
+    static char* _mqttPayload;
+    static PubSubClient* _mqtt;
+    static Adafruit_SSD1306* _display;
+    static RegisterHandler* _registerHandler ;
 
-// Device parameters
-char _version[6] = "v1.24";
 
-// WiFi parameters
-WiFiClient _wifi;
+    // Fixed char array for messages to the serial port
+    static char _debugOutput[100];
 
-// MQTT parameters
-PubSubClient _mqtt(_wifi);
 
-// Buffer Size (and therefore payload size calc)
-int _bufferSize;
-int _maxPayloadSize;
-
-
-// I want to declare this once at a modular level, keep the heap somewhere in check.
-//char _mqttPayload[MAX_MQTT_PAYLOAD_SIZE] = "";
-char* _mqttPayload;
-
-// OLED variables
-char _oledOperatingIndicator = '*';
-char _oledLine2[OLED_CHARACTER_WIDTH] = "";
-char _oledLine3[OLED_CHARACTER_WIDTH] = "";
-char _oledLine4[OLED_CHARACTER_WIDTH] = "";
-
-
-// RS485 and AlphaESS functionality are packed up into classes
-// to keep separate from the main program logic.
-RS485Handler* _modBus;
-RegisterHandler* _registerHandler;
-
-// Fixed char array for messages to the serial port
-char _debugOutput[100];
-
-
-
-// Schedules
-/*
-Add any number of handled registers in this list and they will be
-read and returned every 10 seconds.
-*/
-static struct mqttState _mqttTenSecondStatusRegisters[] PROGMEM =
-{
-	{ REG_BATTERY_HOME_R_SOC, "REG_BATTERY_HOME_R_SOC" },												// State Of Charge
-	{ REG_BATTERY_HOME_R_BATTERY_POWER, "REG_BATTERY_HOME_R_BATTERY_POWER" },							// Battery Power
-	{ REG_BATTERY_HOME_R_VOLTAGE, "REG_BATTERY_HOME_R_VOLTAGE" },										// Battery Voltage
-	{ REG_BATTERY_HOME_R_CURRENT, "REG_BATTERY_HOME_R_CURRENT" },										// Battery Current
-	{ REG_BATTERY_HOME_R_MAX_CELL_TEMPERATURE, "REG_BATTERY_HOME_R_MAX_CELL_TEMPERATURE" },				// Highest Battery Temp
-	{ REG_GRID_METER_R_TOTAL_ACTIVE_POWER_1, "REG_GRID_METER_R_TOTAL_ACTIVE_POWER_1" },					// Total Grid Power (+/-)
-	{ REG_CUSTOM_GRID_CURRENT_A_PHASE, "REG_CUSTOM_GRID_CURRENT_A_PHASE" },								// Grid Current (Phase A)
-	{ REG_PV_METER_R_TOTAL_ACTIVE_POWER_1, "REG_PV_METER_R_TOTAL_ACTIVE_POWER_1" },						// Total PV Power (+/-)
-
-	{ REG_INVERTER_HOME_R_CURRENT_L1, "REG_INVERTER_HOME_R_CURRENT_L1" },								// Inverter Current (L1) (Phase A)
-	{ REG_INVERTER_HOME_R_POWER_L1_1, "REG_INVERTER_HOME_R_POWER_L1_1" },								// Inverter Power (L1) (Phase A)
-	{ REG_INVERTER_HOME_R_INVERTER_TEMP, "REG_INVERTER_HOME_R_INVERTER_TEMP" },							// Inverter Temp
-	{ REG_CUSTOM_LOAD, "REG_CUSTOM_LOAD" },																// Consumption
-
-	{ REG_DISPATCH_RW_DISPATCH_START, "REG_DISPATCH_RW_DISPATCH_START" },
-	{ REG_DISPATCH_RW_DISPATCH_MODE, "REG_DISPATCH_RW_DISPATCH_MODE" },
-	{ REG_DISPATCH_RW_ACTIVE_POWER_1, "REG_DISPATCH_RW_ACTIVE_POWER_1" },
-	{ REG_DISPATCH_RW_DISPATCH_SOC, "REG_DISPATCH_RW_DISPATCH_SOC" },
-	{ REG_DISPATCH_RW_DISPATCH_TIME_1, "REG_DISPATCH_RW_DISPATCH_TIME_1" },
-
-	{ REG_INVERTER_HOME_R_PV1_POWER_1, "REG_INVERTER_HOME_R_PV1_POWER_1" },
-	{ REG_INVERTER_HOME_R_PV2_POWER_1, "REG_INVERTER_HOME_R_PV2_POWER_1" },
-	{ REG_INVERTER_HOME_R_PV3_POWER_1, "REG_INVERTER_HOME_R_PV3_POWER_1" },
-	{ REG_INVERTER_HOME_R_PV4_POWER_1, "REG_INVERTER_HOME_R_PV4_POWER_1" },
-	{ REG_INVERTER_HOME_R_PV5_POWER_1, "REG_INVERTER_HOME_R_PV5_POWER_1" },
-	{ REG_INVERTER_HOME_R_PV6_POWER_1, "REG_INVERTER_HOME_R_PV6_POWER_1" },
-
-	{ REG_CUSTOM_TOTAL_SOLAR_POWER, "REG_CUSTOM_TOTAL_SOLAR_POWER" }
-
-	/*
-	* 
-	* Alpha don't appear to expose Solar Current, Battery Cycles
-	* They don't expose Load either via a register, it is a calculation which Alpha ESS provided the logic for.
-	* Alpha don't also expose today's generation / exported / purchased / consumed, so if using Home Assistant leverage
-	* https://www.home-assistant.io/integrations/integration/#energy
-	* Will convert regular submitted power readings (in W or kW) into kWh for use in Utility Meters
-	* https://www.home-assistant.io/integrations/utility_meter/
-	* Which you can configure numerous of, and set to restart daily, weekly, monthly, etc.
-	*/
-};
-
-/*
-Add any number of handled registers in this list and they will be
-read and returned every minute.
-*/
-static struct mqttState _mqttOneMinuteStatusRegisters[] PROGMEM =
-{
-	{ REG_GRID_METER_R_VOLTAGE_OF_A_PHASE, "REG_GRID_METER_R_VOLTAGE_OF_A_PHASE" },
-	{ REG_PV_METER_R_VOLTAGE_OF_A_PHASE, "REG_PV_METER_R_VOLTAGE_OF_A_PHASE" },
-	{ REG_INVERTER_HOME_R_VOLTAGE_L1, "REG_INVERTER_HOME_R_VOLTAGE_L1" },
-};
-
-/*
-Add any number of handled registers in this list and they will be
-read and returned every five minutes.
-*/
-static struct mqttState _mqttFiveMinuteStatusRegisters[] PROGMEM =
-{
-	{ REG_BATTERY_HOME_R_BATTERY_CHARGE_ENERGY_1, "REG_BATTERY_HOME_R_BATTERY_CHARGE_ENERGY_1" },
-	{ REG_BATTERY_HOME_R_BATTERY_DISCHARGE_ENERGY_1, "REG_BATTERY_HOME_R_BATTERY_DISCHARGE_ENERGY_1" },
-	{ REG_BATTERY_HOME_R_BATTERY_ENERGY_CHARGE_FROM_GRID_1, "REG_BATTERY_HOME_R_BATTERY_ENERGY_CHARGE_FROM_GRID_1" }
-};
-
-/*
-Add any number of handled registers in this list and they will be
-read and returned every hour.
-*/
-static struct mqttState _mqttOneHourStatusRegisters[] PROGMEM =
-{
-	{ REG_GRID_METER_R_FREQUENCY, "REG_GRID_METER_R_FREQUENCY" },
-	{ REG_PV_METER_R_FREQUENCY, "REG_PV_METER_R_FREQUENCY" },
-	{ REG_INVERTER_HOME_R_FREQUENCY, "REG_INVERTER_HOME_R_FREQUENCY" },
-	{ REG_SYSTEM_OP_R_SYSTEM_FAULT_1, "REG_SYSTEM_OP_R_SYSTEM_FAULT_1" },
-	{ REG_BATTERY_HOME_R_BATTERY_FAULT_1, "REG_BATTERY_HOME_R_BATTERY_FAULT_1" }
-};
-
-/*
-Add any number of handled registers in this list and they will be
-read and returned every day.
-*/
-static struct mqttState _mqttOneDayStatusRegisters[] PROGMEM =
-{
-	{ REG_SYSTEM_OP_R_SYSTEM_TOTAL_PV_ENERGY_1, "REG_SYSTEM_OP_R_SYSTEM_TOTAL_PV_ENERGY_1" },
-	{ REG_GRID_METER_R_TOTAL_ENERGY_FEED_TO_GRID_1, "REG_GRID_METER_R_TOTAL_ENERGY_FEED_TO_GRID_1" },
-	{ REG_GRID_METER_R_TOTAL_ENERGY_CONSUMED_FROM_GRID_1, "REG_GRID_METER_R_TOTAL_ENERGY_CONSUMED_FROM_GRID_1" },
-	{ REG_PV_METER_R_TOTAL_ENERGY_FEED_TO_GRID_1, "REG_PV_METER_R_TOTAL_ENERGY_FEED_TO_GRID_1" },
-	{ REG_PV_METER_R_TOTAL_ENERGY_CONSUMED_FROM_GRID_1, "REG_PV_METER_R_TOTAL_ENERGY_CONSUMED_FROM_GRID_1" }
-};
-
-
-/*
-Every handled register
-*/
-
-static struct mqttState _mqttAllHandledRegisters[] PROGMEM =
-{
-	{ REG_GRID_METER_RW_GRID_METER_CT_ENABLE, "REG_GRID_METER_RW_GRID_METER_CT_ENABLE" },
-	{ REG_GRID_METER_RW_GRID_METER_CT_RATE, "REG_GRID_METER_RW_GRID_METER_CT_RATE" },
-	{ REG_GRID_METER_R_TOTAL_ENERGY_FEED_TO_GRID_1, "REG_GRID_METER_R_TOTAL_ENERGY_FEED_TO_GRID_1" },
-	{ REG_GRID_METER_R_TOTAL_ENERGY_CONSUMED_FROM_GRID_1, "REG_GRID_METER_R_TOTAL_ENERGY_CONSUMED_FROM_GRID_1" },
-	{ REG_GRID_METER_R_VOLTAGE_OF_A_PHASE, "REG_GRID_METER_R_VOLTAGE_OF_A_PHASE" },
-	{ REG_GRID_METER_R_VOLTAGE_OF_B_PHASE, "REG_GRID_METER_R_VOLTAGE_OF_B_PHASE" },
-	{ REG_GRID_METER_R_VOLTAGE_OF_C_PHASE, "REG_GRID_METER_R_VOLTAGE_OF_C_PHASE" },
-	{ REG_GRID_METER_R_CURRENT_OF_A_PHASE, "REG_GRID_METER_R_CURRENT_OF_A_PHASE" },
-	{ REG_GRID_METER_R_CURRENT_OF_B_PHASE, "REG_GRID_METER_R_CURRENT_OF_B_PHASE" },
-	{ REG_GRID_METER_R_CURRENT_OF_C_PHASE, "REG_GRID_METER_R_CURRENT_OF_C_PHASE" },
-	{ REG_GRID_METER_R_FREQUENCY, "REG_GRID_METER_R_FREQUENCY" },
-	{ REG_GRID_METER_R_ACTIVE_POWER_OF_A_PHASE_1, "REG_GRID_METER_R_ACTIVE_POWER_OF_A_PHASE_1" },
-	{ REG_GRID_METER_R_ACTIVE_POWER_OF_B_PHASE_1, "REG_GRID_METER_R_ACTIVE_POWER_OF_B_PHASE_1" },
-	{ REG_GRID_METER_R_ACTIVE_POWER_OF_C_PHASE_1, "REG_GRID_METER_R_ACTIVE_POWER_OF_C_PHASE_1" },
-	{ REG_GRID_METER_R_TOTAL_ACTIVE_POWER_1, "REG_GRID_METER_R_TOTAL_ACTIVE_POWER_1" },
-	{ REG_GRID_METER_R_REACTIVE_POWER_OF_A_PHASE_1, "REG_GRID_METER_R_REACTIVE_POWER_OF_A_PHASE_1" },
-	{ REG_GRID_METER_R_REACTIVE_POWER_OF_B_PHASE_1, "REG_GRID_METER_R_REACTIVE_POWER_OF_B_PHASE_1" },
-	{ REG_GRID_METER_R_REACTIVE_POWER_OF_C_PHASE_1, "REG_GRID_METER_R_REACTIVE_POWER_OF_C_PHASE_1" },
-	{ REG_GRID_METER_R_TOTAL_REACTIVE_POWER_1, "REG_GRID_METER_R_TOTAL_REACTIVE_POWER_1" },
-	{ REG_GRID_METER_R_APPARENT_POWER_OF_A_PHASE_1, "REG_GRID_METER_R_APPARENT_POWER_OF_A_PHASE_1" },
-	{ REG_GRID_METER_R_APPARENT_POWER_OF_B_PHASE_1, "REG_GRID_METER_R_APPARENT_POWER_OF_B_PHASE_1" },
-	{ REG_GRID_METER_R_APPARENT_POWER_OF_C_PHASE_1, "REG_GRID_METER_R_APPARENT_POWER_OF_C_PHASE_1" },
-	{ REG_GRID_METER_R_TOTAL_APPARENT_POWER_1, "REG_GRID_METER_R_TOTAL_APPARENT_POWER_1" },
-	{ REG_GRID_METER_R_POWER_FACTOR_OF_A_PHASE, "REG_GRID_METER_R_POWER_FACTOR_OF_A_PHASE" },
-	{ REG_GRID_METER_R_POWER_FACTOR_OF_B_PHASE, "REG_GRID_METER_R_POWER_FACTOR_OF_B_PHASE" },
-	{ REG_GRID_METER_R_POWER_FACTOR_OF_C_PHASE, "REG_GRID_METER_R_POWER_FACTOR_OF_C_PHASE" },
-	{ REG_GRID_METER_R_TOTAL_POWER_FACTOR, "REG_GRID_METER_R_TOTAL_POWER_FACTOR" },
-	{ REG_PV_METER_RW_PV_METER_CT_ENABLE, "REG_PV_METER_RW_PV_METER_CT_ENABLE" },
-	{ REG_PV_METER_RW_PV_METER_CT_RATE, "REG_PV_METER_RW_PV_METER_CT_RATE" },
-	{ REG_PV_METER_R_TOTAL_ENERGY_FEED_TO_GRID_1, "REG_PV_METER_R_TOTAL_ENERGY_FEED_TO_GRID_1" },
-	{ REG_PV_METER_R_TOTAL_ENERGY_CONSUMED_FROM_GRID_1, "REG_PV_METER_R_TOTAL_ENERGY_CONSUMED_FROM_GRID_1" },
-	{ REG_PV_METER_R_VOLTAGE_OF_A_PHASE, "REG_PV_METER_R_VOLTAGE_OF_A_PHASE" },
-	{ REG_PV_METER_R_VOLTAGE_OF_B_PHASE, "REG_PV_METER_R_VOLTAGE_OF_B_PHASE" },
-	{ REG_PV_METER_R_VOLTAGE_OF_C_PHASE, "REG_PV_METER_R_VOLTAGE_OF_C_PHASE" },
-	{ REG_PV_METER_R_CURRENT_OF_A_PHASE, "REG_PV_METER_R_CURRENT_OF_A_PHASE" },
-	{ REG_PV_METER_R_CURRENT_OF_B_PHASE, "REG_PV_METER_R_CURRENT_OF_B_PHASE" },
-	{ REG_PV_METER_R_CURRENT_OF_C_PHASE, "REG_PV_METER_R_CURRENT_OF_C_PHASE" },
-	{ REG_PV_METER_R_FREQUENCY, "REG_PV_METER_R_FREQUENCY" },
-	{ REG_PV_METER_R_ACTIVE_POWER_OF_A_PHASE_1, "REG_PV_METER_R_ACTIVE_POWER_OF_A_PHASE_1" },
-	{ REG_PV_METER_R_ACTIVE_POWER_OF_B_PHASE_1, "REG_PV_METER_R_ACTIVE_POWER_OF_B_PHASE_1" },
-	{ REG_PV_METER_R_ACTIVE_POWER_OF_C_PHASE_1, "REG_PV_METER_R_ACTIVE_POWER_OF_C_PHASE_1" },
-	{ REG_PV_METER_R_TOTAL_ACTIVE_POWER_1, "REG_PV_METER_R_TOTAL_ACTIVE_POWER_1" },
-	{ REG_PV_METER_R_REACTIVE_POWER_OF_A_PHASE_1, "REG_PV_METER_R_REACTIVE_POWER_OF_A_PHASE_1" },
-	{ REG_PV_METER_R_REACTIVE_POWER_OF_B_PHASE_1, "REG_PV_METER_R_REACTIVE_POWER_OF_B_PHASE_1" },
-	{ REG_PV_METER_R_REACTIVE_POWER_OF_C_PHASE_1, "REG_PV_METER_R_REACTIVE_POWER_OF_C_PHASE_1" },
-	{ REG_PV_METER_R_TOTAL_REACTIVE_POWER_1, "REG_PV_METER_R_TOTAL_REACTIVE_POWER_1" },
-	{ REG_PV_METER_R_APPARENT_POWER_OF_A_PHASE_1, "REG_PV_METER_R_APPARENT_POWER_OF_A_PHASE_1" },
-	{ REG_PV_METER_R_APPARENT_POWER_OF_B_PHASE_1, "REG_PV_METER_R_APPARENT_POWER_OF_B_PHASE_1" },
-	{ REG_PV_METER_R_APPARENT_POWER_OF_C_PHASE_1, "REG_PV_METER_R_APPARENT_POWER_OF_C_PHASE_1" },
-	{ REG_PV_METER_R_TOTAL_APPARENT_POWER_1, "REG_PV_METER_R_TOTAL_APPARENT_POWER_1" },
-	{ REG_PV_METER_R_POWER_FACTOR_OF_A_PHASE, "REG_PV_METER_R_POWER_FACTOR_OF_A_PHASE" },
-	{ REG_PV_METER_R_POWER_FACTOR_OF_B_PHASE, "REG_PV_METER_R_POWER_FACTOR_OF_B_PHASE" },
-	{ REG_PV_METER_R_POWER_FACTOR_OF_C_PHASE, "REG_PV_METER_R_POWER_FACTOR_OF_C_PHASE" },
-	{ REG_PV_METER_R_TOTAL_POWER_FACTOR, "REG_PV_METER_R_TOTAL_POWER_FACTOR" },
-	{ REG_BATTERY_HOME_R_VOLTAGE, "REG_BATTERY_HOME_R_VOLTAGE" },
-	{ REG_BATTERY_HOME_R_CURRENT, "REG_BATTERY_HOME_R_CURRENT" },
-	{ REG_BATTERY_HOME_R_SOC, "REG_BATTERY_HOME_R_SOC" },
-	{ REG_BATTERY_HOME_R_STATUS, "REG_BATTERY_HOME_R_STATUS" },
-	{ REG_BATTERY_HOME_R_RELAY_STATUS, "REG_BATTERY_HOME_R_RELAY_STATUS" },
-	{ REG_BATTERY_HOME_R_PACK_ID_OF_MIN_CELL_VOLTAGE, "REG_BATTERY_HOME_R_PACK_ID_OF_MIN_CELL_VOLTAGE" },
-	{ REG_BATTERY_HOME_R_CELL_ID_OF_MIN_CELL_VOLTAGE, "REG_BATTERY_HOME_R_CELL_ID_OF_MIN_CELL_VOLTAGE" },
-	{ REG_BATTERY_HOME_R_MIN_CELL_VOLTAGE, "REG_BATTERY_HOME_R_MIN_CELL_VOLTAGE" },
-	{ REG_BATTERY_HOME_R_PACK_ID_OF_MAX_CELL_VOLTAGE, "REG_BATTERY_HOME_R_PACK_ID_OF_MAX_CELL_VOLTAGE" },
-	{ REG_BATTERY_HOME_R_CELL_ID_OF_MAX_CELL_VOLTAGE, "REG_BATTERY_HOME_R_CELL_ID_OF_MAX_CELL_VOLTAGE" },
-	{ REG_BATTERY_HOME_R_MAX_CELL_VOLTAGE, "REG_BATTERY_HOME_R_MAX_CELL_VOLTAGE" },
-	{ REG_BATTERY_HOME_R_PACK_ID_OF_MIN_CELL_TEMPERATURE, "REG_BATTERY_HOME_R_PACK_ID_OF_MIN_CELL_TEMPERATURE" },
-	{ REG_BATTERY_HOME_R_CELL_ID_OF_MIN_CELL_TEMPERATURE, "REG_BATTERY_HOME_R_CELL_ID_OF_MIN_CELL_TEMPERATURE" },
-	{ REG_BATTERY_HOME_R_MIN_CELL_TEMPERATURE, "REG_BATTERY_HOME_R_MIN_CELL_TEMPERATURE" },
-	{ REG_BATTERY_HOME_R_PACK_ID_OF_MAX_CELL_TEMPERATURE, "REG_BATTERY_HOME_R_PACK_ID_OF_MAX_CELL_TEMPERATURE" },
-	{ REG_BATTERY_HOME_R_CELL_ID_OF_MAX_CELL_TEMPERATURE, "REG_BATTERY_HOME_R_CELL_ID_OF_MAX_CELL_TEMPERATURE" },
-	{ REG_BATTERY_HOME_R_MAX_CELL_TEMPERATURE, "REG_BATTERY_HOME_R_MAX_CELL_TEMPERATURE" },
-	{ REG_BATTERY_HOME_R_MAX_CHARGE_CURRENT, "REG_BATTERY_HOME_R_MAX_CHARGE_CURRENT" },
-	{ REG_BATTERY_HOME_R_MAX_DISCHARGE_CURRENT, "REG_BATTERY_HOME_R_MAX_DISCHARGE_CURRENT" },
-	{ REG_BATTERY_HOME_R_CHARGE_CUT_OFF_VOLTAGE, "REG_BATTERY_HOME_R_CHARGE_CUT_OFF_VOLTAGE" },
-	{ REG_BATTERY_HOME_R_DISCHARGE_CUT_OFF_VOLTAGE, "REG_BATTERY_HOME_R_DISCHARGE_CUT_OFF_VOLTAGE" },
-	{ REG_BATTERY_HOME_R_BMU_SOFTWARE_VERSION, "REG_BATTERY_HOME_R_BMU_SOFTWARE_VERSION" },
-	{ REG_BATTERY_HOME_R_LMU_SOFTWARE_VERSION, "REG_BATTERY_HOME_R_LMU_SOFTWARE_VERSION" },
-	{ REG_BATTERY_HOME_R_ISO_SOFTWARE_VERSION, "REG_BATTERY_HOME_R_ISO_SOFTWARE_VERSION" },
-	{ REG_BATTERY_HOME_R_BATTERY_NUMBER, "REG_BATTERY_HOME_R_BATTERY_NUMBER" },
-	{ REG_BATTERY_HOME_R_BATTERY_CAPACITY, "REG_BATTERY_HOME_R_BATTERY_CAPACITY" },
-	{ REG_BATTERY_HOME_R_BATTERY_TYPE, "REG_BATTERY_HOME_R_BATTERY_TYPE" },
-	{ REG_BATTERY_HOME_R_BATTERY_SOH, "REG_BATTERY_HOME_R_BATTERY_SOH" },
-	{ REG_BATTERY_HOME_R_BATTERY_WARNING_1, "REG_BATTERY_HOME_R_BATTERY_WARNING_1" },
-	{ REG_BATTERY_HOME_R_BATTERY_FAULT_1, "REG_BATTERY_HOME_R_BATTERY_FAULT_1" },
-	{ REG_BATTERY_HOME_R_BATTERY_CHARGE_ENERGY_1, "REG_BATTERY_HOME_R_BATTERY_CHARGE_ENERGY_1" },
-	{ REG_BATTERY_HOME_R_BATTERY_DISCHARGE_ENERGY_1, "REG_BATTERY_HOME_R_BATTERY_DISCHARGE_ENERGY_1" },
-	{ REG_BATTERY_HOME_R_BATTERY_ENERGY_CHARGE_FROM_GRID_1, "REG_BATTERY_HOME_R_BATTERY_ENERGY_CHARGE_FROM_GRID_1" },
-	{ REG_BATTERY_HOME_R_BATTERY_POWER, "REG_BATTERY_HOME_R_BATTERY_POWER" },
-	{ REG_BATTERY_HOME_R_BATTERY_REMAINING_TIME, "REG_BATTERY_HOME_R_BATTERY_REMAINING_TIME" },
-	{ REG_BATTERY_HOME_R_BATTERY_IMPLEMENTATION_CHARGE_SOC, "REG_BATTERY_HOME_R_BATTERY_IMPLEMENTATION_CHARGE_SOC" },
-	{ REG_BATTERY_HOME_R_BATTERY_IMPLEMENTATION_DISCHARGE_SOC, "REG_BATTERY_HOME_R_BATTERY_IMPLEMENTATION_DISCHARGE_SOC" },
-	{ REG_BATTERY_HOME_R_BATTERY_REMAINING_CHARGE_SOC, "REG_BATTERY_HOME_R_BATTERY_REMAINING_CHARGE_SOC" },
-	{ REG_BATTERY_HOME_R_BATTERY_REMAINING_DISCHARGE_SOC, "REG_BATTERY_HOME_R_BATTERY_REMAINING_DISCHARGE_SOC" },
-	{ REG_BATTERY_HOME_R_BATTERY_MAX_CHARGE_POWER, "REG_BATTERY_HOME_R_BATTERY_MAX_CHARGE_POWER" },
-	{ REG_BATTERY_HOME_R_BATTERY_MAX_DISCHARGE_POWER, "REG_BATTERY_HOME_R_BATTERY_MAX_DISCHARGE_POWER" },
-	{ REG_BATTERY_HOME_RW_BATTERY_MOS_CONTROL, "REG_BATTERY_HOME_RW_BATTERY_MOS_CONTROL" },
-	{ REG_BATTERY_HOME_R_BATTERY_SOC_CALIBRATION, "REG_BATTERY_HOME_R_BATTERY_SOC_CALIBRATION" },
-	{ REG_BATTERY_HOME_R_BATTERY_SINGLE_CUT_ERROR_CODE, "REG_BATTERY_HOME_R_BATTERY_SINGLE_CUT_ERROR_CODE" },
-	{ REG_BATTERY_HOME_R_BATTERY_FAULT_1_1, "REG_BATTERY_HOME_R_BATTERY_FAULT_1_1" },
-	{ REG_BATTERY_HOME_R_BATTERY_FAULT_2_1, "REG_BATTERY_HOME_R_BATTERY_FAULT_2_1" },
-	{ REG_BATTERY_HOME_R_BATTERY_FAULT_3_1, "REG_BATTERY_HOME_R_BATTERY_FAULT_3_1" },
-	{ REG_BATTERY_HOME_R_BATTERY_FAULT_4_1, "REG_BATTERY_HOME_R_BATTERY_FAULT_4_1" },
-	{ REG_BATTERY_HOME_R_BATTERY_FAULT_5_1, "REG_BATTERY_HOME_R_BATTERY_FAULT_5_1" },
-	{ REG_BATTERY_HOME_R_BATTERY_FAULT_6_1, "REG_BATTERY_HOME_R_BATTERY_FAULT_6_1" },
-	{ REG_BATTERY_HOME_R_BATTERY_WARNING_1_1, "REG_BATTERY_HOME_R_BATTERY_WARNING_1_1" },
-	{ REG_BATTERY_HOME_R_BATTERY_WARNING_2_1, "REG_BATTERY_HOME_R_BATTERY_WARNING_2_1" },
-	{ REG_BATTERY_HOME_R_BATTERY_WARNING_3_1, "REG_BATTERY_HOME_R_BATTERY_WARNING_3_1" },
-	{ REG_BATTERY_HOME_R_BATTERY_WARNING_4_1, "REG_BATTERY_HOME_R_BATTERY_WARNING_4_1" },
-	{ REG_BATTERY_HOME_R_BATTERY_WARNING_5_1, "REG_BATTERY_HOME_R_BATTERY_WARNING_5_1" },
-	{ REG_BATTERY_HOME_R_BATTERY_WARNING_6_1, "REG_BATTERY_HOME_R_BATTERY_WARNING_6_1" },
-	{ REG_INVERTER_HOME_R_VOLTAGE_L1, "REG_INVERTER_HOME_R_VOLTAGE_L1" },
-	{ REG_INVERTER_HOME_R_VOLTAGE_L2, "REG_INVERTER_HOME_R_VOLTAGE_L2" },
-	{ REG_INVERTER_HOME_R_VOLTAGE_L3, "REG_INVERTER_HOME_R_VOLTAGE_L3" },
-	{ REG_INVERTER_HOME_R_CURRENT_L1, "REG_INVERTER_HOME_R_CURRENT_L1" },
-	{ REG_INVERTER_HOME_R_CURRENT_L2, "REG_INVERTER_HOME_R_CURRENT_L2" },
-	{ REG_INVERTER_HOME_R_CURRENT_L3, "REG_INVERTER_HOME_R_CURRENT_L3" },
-	{ REG_INVERTER_HOME_R_POWER_L1_1, "REG_INVERTER_HOME_R_POWER_L1_1" },
-	{ REG_INVERTER_HOME_R_POWER_L2_1, "REG_INVERTER_HOME_R_POWER_L2_1" },
-	{ REG_INVERTER_HOME_R_POWER_L3_1, "REG_INVERTER_HOME_R_POWER_L3_1" },
-	{ REG_INVERTER_HOME_R_POWER_TOTAL_1, "REG_INVERTER_HOME_R_POWER_TOTAL_1" },
-	{ REG_INVERTER_HOME_R_BACKUP_VOLTAGE_L1, "REG_INVERTER_HOME_R_BACKUP_VOLTAGE_L1" },
-	{ REG_INVERTER_HOME_R_BACKUP_VOLTAGE_L2, "REG_INVERTER_HOME_R_BACKUP_VOLTAGE_L2" },
-	{ REG_INVERTER_HOME_R_BACKUP_VOLTAGE_L3, "REG_INVERTER_HOME_R_BACKUP_VOLTAGE_L3" },
-	{ REG_INVERTER_HOME_R_BACKUP_CURRENT_L1, "REG_INVERTER_HOME_R_BACKUP_CURRENT_L1" },
-	{ REG_INVERTER_HOME_R_BACKUP_CURRENT_L2, "REG_INVERTER_HOME_R_BACKUP_CURRENT_L2" },
-	{ REG_INVERTER_HOME_R_BACKUP_CURRENT_L3, "REG_INVERTER_HOME_R_BACKUP_CURRENT_L3" },
-	{ REG_INVERTER_HOME_R_BACKUP_POWER_L1_1, "REG_INVERTER_HOME_R_BACKUP_POWER_L1_1" },
-	{ REG_INVERTER_HOME_R_BACKUP_POWER_L2_1, "REG_INVERTER_HOME_R_BACKUP_POWER_L2_1" },
-	{ REG_INVERTER_HOME_R_BACKUP_POWER_L3_1, "REG_INVERTER_HOME_R_BACKUP_POWER_L3_1" },
-	{ REG_INVERTER_HOME_R_BACKUP_POWER_TOTAL_1, "REG_INVERTER_HOME_R_BACKUP_POWER_TOTAL_1" },
-	{ REG_INVERTER_HOME_R_FREQUENCY, "REG_INVERTER_HOME_R_FREQUENCY" },
-	{ REG_INVERTER_HOME_R_PV1_VOLTAGE, "REG_INVERTER_HOME_R_PV1_VOLTAGE" },
-	{ REG_INVERTER_HOME_R_PV1_CURRENT, "REG_INVERTER_HOME_R_PV1_CURRENT" },
-	{ REG_INVERTER_HOME_R_PV1_POWER_1, "REG_INVERTER_HOME_R_PV1_POWER_1" },
-	{ REG_INVERTER_HOME_R_PV2_VOLTAGE, "REG_INVERTER_HOME_R_PV2_VOLTAGE" },
-	{ REG_INVERTER_HOME_R_PV2_CURRENT, "REG_INVERTER_HOME_R_PV2_CURRENT" },
-	{ REG_INVERTER_HOME_R_PV2_POWER_1, "REG_INVERTER_HOME_R_PV2_POWER_1" },
-	{ REG_INVERTER_HOME_R_PV3_VOLTAGE, "REG_INVERTER_HOME_R_PV3_VOLTAGE" },
-	{ REG_INVERTER_HOME_R_PV3_CURRENT, "REG_INVERTER_HOME_R_PV3_CURRENT" },
-	{ REG_INVERTER_HOME_R_PV3_POWER_1, "REG_INVERTER_HOME_R_PV3_POWER_1" },
-	{ REG_INVERTER_HOME_R_PV4_VOLTAGE, "REG_INVERTER_HOME_R_PV4_VOLTAGE" },
-	{ REG_INVERTER_HOME_R_PV4_CURRENT, "REG_INVERTER_HOME_R_PV4_CURRENT" },
-	{ REG_INVERTER_HOME_R_PV4_POWER_1, "REG_INVERTER_HOME_R_PV4_POWER_1" },
-	{ REG_INVERTER_HOME_R_PV5_VOLTAGE, "REG_INVERTER_HOME_R_PV5_VOLTAGE" },
-	{ REG_INVERTER_HOME_R_PV5_CURRENT, "REG_INVERTER_HOME_R_PV5_CURRENT" },
-	{ REG_INVERTER_HOME_R_PV5_POWER_1, "REG_INVERTER_HOME_R_PV5_POWER_1" },
-	{ REG_INVERTER_HOME_R_PV6_VOLTAGE, "REG_INVERTER_HOME_R_PV6_VOLTAGE" },
-	{ REG_INVERTER_HOME_R_PV6_CURRENT, "REG_INVERTER_HOME_R_PV6_CURRENT" },
-	{ REG_INVERTER_HOME_R_PV6_POWER_1, "REG_INVERTER_HOME_R_PV6_POWER_1" },
-	{ REG_INVERTER_HOME_R_INVERTER_TEMP, "REG_INVERTER_HOME_R_INVERTER_TEMP" },
-	{ REG_INVERTER_HOME_R_INVERTER_WARNING_1_1, "REG_INVERTER_HOME_R_INVERTER_WARNING_1_1" },
-	{ REG_INVERTER_HOME_R_INVERTER_WARNING_2_1, "REG_INVERTER_HOME_R_INVERTER_WARNING_2_1" },
-	{ REG_INVERTER_HOME_R_INVERTER_FAULT_1_1, "REG_INVERTER_HOME_R_INVERTER_FAULT_1_1" },
-	{ REG_INVERTER_HOME_R_INVERTER_FAULT_2_1, "REG_INVERTER_HOME_R_INVERTER_FAULT_2_1" },
-	{ REG_INVERTER_HOME_R_INVERTER_TOTAL_PV_ENERGY_1, "REG_INVERTER_HOME_R_INVERTER_TOTAL_PV_ENERGY_1" },
-	{ REG_INVERTER_HOME_R_WORKING_MODE, "REG_INVERTER_HOME_R_WORKING_MODE" },
-	{ REG_INVERTER_INFO_R_MASTER_SOFTWARE_VERSION_1, "REG_INVERTER_INFO_R_MASTER_SOFTWARE_VERSION_1" },
-	{ REG_INVERTER_INFO_R_SLAVE_SOFTWARE_VERSION_1, "REG_INVERTER_INFO_R_SLAVE_SOFTWARE_VERSION_1" },
-	{ REG_INVERTER_INFO_R_SERIAL_NUMBER_1, "REG_INVERTER_INFO_R_SERIAL_NUMBER_1" },
-	{ REG_SYSTEM_INFO_RW_SYSTEM_TIME_YEAR_MONTH, "REG_SYSTEM_INFO_RW_SYSTEM_TIME_YEAR_MONTH" },
-	{ REG_SYSTEM_INFO_RW_SYSTEM_TIME_DAY_HOUR, "REG_SYSTEM_INFO_RW_SYSTEM_TIME_DAY_HOUR" },
-	{ REG_SYSTEM_INFO_RW_SYSTEM_TIME_MINUTE_SECOND, "REG_SYSTEM_INFO_RW_SYSTEM_TIME_MINUTE_SECOND" },
-	{ REG_SYSTEM_INFO_R_EMS_SN_BYTE_1_2, "REG_SYSTEM_INFO_R_EMS_SN_BYTE_1_2" },
-	{ REG_SYSTEM_INFO_R_EMS_VERSION_HIGH, "REG_SYSTEM_INFO_R_EMS_VERSION_HIGH" },
-	{ REG_SYSTEM_INFO_R_EMS_VERSION_MIDDLE, "REG_SYSTEM_INFO_R_EMS_VERSION_MIDDLE" },
-	{ REG_SYSTEM_INFO_R_EMS_VERSION_LOW, "REG_SYSTEM_INFO_R_EMS_VERSION_LOW" },
-	{ REG_SYSTEM_INFO_R_PROTOCOL_VERSION, "REG_SYSTEM_INFO_R_PROTOCOL_VERSION" },
-	{ REG_SYSTEM_CONFIG_RW_MAX_FEED_INTO_GRID_PERCENT, "REG_SYSTEM_CONFIG_RW_MAX_FEED_INTO_GRID_PERCENT" },
-	{ REG_SYSTEM_CONFIG_RW_PV_CAPACITY_STORAGE_1, "REG_SYSTEM_CONFIG_RW_PV_CAPACITY_STORAGE_1" },
-	{ REG_SYSTEM_CONFIG_RW_PV_CAPACITY_OF_GRID_INVERTER_1, "REG_SYSTEM_CONFIG_RW_PV_CAPACITY_OF_GRID_INVERTER_1" },
-	{ REG_SYSTEM_CONFIG_RW_SYSTEM_MODE, "REG_SYSTEM_CONFIG_RW_SYSTEM_MODE" },
-	{ REG_SYSTEM_CONFIG_RW_METER_CT_SELECT, "REG_SYSTEM_CONFIG_RW_METER_CT_SELECT" },
-	{ REG_SYSTEM_CONFIG_RW_BATTERY_READY, "REG_SYSTEM_CONFIG_RW_BATTERY_READY" },
-	{ REG_SYSTEM_CONFIG_RW_IP_METHOD, "REG_SYSTEM_CONFIG_RW_IP_METHOD" },
-	{ REG_SYSTEM_CONFIG_RW_LOCAL_IP_1, "REG_SYSTEM_CONFIG_RW_LOCAL_IP_1" },
-	{ REG_SYSTEM_CONFIG_RW_SUBNET_MASK_1, "REG_SYSTEM_CONFIG_RW_SUBNET_MASK_1" },
-	{ REG_SYSTEM_CONFIG_RW_GATEWAY_1, "REG_SYSTEM_CONFIG_RW_GATEWAY_1" },
-	{ REG_SYSTEM_CONFIG_RW_MODBUS_ADDRESS, "REG_SYSTEM_CONFIG_RW_MODBUS_ADDRESS" },
-	{ REG_SYSTEM_CONFIG_RW_MODBUS_BAUD_RATE, "REG_SYSTEM_CONFIG_RW_MODBUS_BAUD_RATE" },
-	{ REG_TIMING_RW_TIME_PERIOD_CONTROL_FLAG, "REG_TIMING_RW_TIME_PERIOD_CONTROL_FLAG" },
-	{ REG_TIMING_RW_UPS_RESERVE_SOC, "REG_TIMING_RW_UPS_RESERVE_SOC" },
-	{ REG_TIMING_RW_TIME_DISCHARGE_START_TIME_1, "REG_TIMING_RW_TIME_DISCHARGE_START_TIME_1" },
-	{ REG_TIMING_RW_TIME_DISCHARGE_STOP_TIME_1, "REG_TIMING_RW_TIME_DISCHARGE_STOP_TIME_1" },
-	{ REG_TIMING_RW_TIME_DISCHARGE_START_TIME_2, "REG_TIMING_RW_TIME_DISCHARGE_START_TIME_2" },
-	{ REG_TIMING_RW_TIME_DISCHARGE_STOP_TIME_2, "REG_TIMING_RW_TIME_DISCHARGE_STOP_TIME_2" },
-	{ REG_TIMING_RW_CHARGE_CUT_SOC, "REG_TIMING_RW_CHARGE_CUT_SOC" },
-	{ REG_TIMING_RW_TIME_CHARGE_START_TIME_1, "REG_TIMING_RW_TIME_CHARGE_START_TIME_1" },
-	{ REG_TIMING_RW_TIME_CHARGE_STOP_TIME_1, "REG_TIMING_RW_TIME_CHARGE_STOP_TIME_1" },
-	{ REG_TIMING_RW_TIME_CHARGE_START_TIME_2, "REG_TIMING_RW_TIME_CHARGE_START_TIME_2" },
-	{ REG_TIMING_RW_TIME_CHARGE_STOP_TIME_2, "REG_TIMING_RW_TIME_CHARGE_STOP_TIME_2" },
-	{ REG_DISPATCH_RW_DISPATCH_START, "REG_DISPATCH_RW_DISPATCH_START" },
-	{ REG_DISPATCH_RW_ACTIVE_POWER_1, "REG_DISPATCH_RW_ACTIVE_POWER_1" },
-	{ REG_DISPATCH_RW_REACTIVE_POWER_1, "REG_DISPATCH_RW_REACTIVE_POWER_1" },
-	{ REG_DISPATCH_RW_DISPATCH_MODE, "REG_DISPATCH_RW_DISPATCH_MODE" },
-	{ REG_DISPATCH_RW_DISPATCH_SOC, "REG_DISPATCH_RW_DISPATCH_SOC" },
-	{ REG_DISPATCH_RW_DISPATCH_TIME_1, "REG_DISPATCH_RW_DISPATCH_TIME_1" },
-	{ REG_AUXILIARY_R_EMS_DI0, "REG_AUXILIARY_R_EMS_DI0" },
-	{ REG_AUXILIARY_R_EMS_DI1, "REG_AUXILIARY_R_EMS_DI1" },
-	{ REG_SYSTEM_OP_R_PV_INVERTER_ENERGY_1, "REG_SYSTEM_OP_R_PV_INVERTER_ENERGY_1" },
-	{ REG_SYSTEM_OP_R_SYSTEM_TOTAL_PV_ENERGY_1, "REG_SYSTEM_OP_R_SYSTEM_TOTAL_PV_ENERGY_1" },
-	{ REG_SYSTEM_OP_R_SYSTEM_FAULT_1, "REG_SYSTEM_OP_R_SYSTEM_FAULT_1" },
-	{ REG_SAFETY_TEST_RW_GRID_REGULATION, "REG_SAFETY_TEST_RW_GRID_REGULATION" },
-	{ REG_CUSTOM_LOAD, "REG_CUSTOM_LOAD" },
-	{ REG_CUSTOM_SYSTEM_DATE_TIME, "REG_CUSTOM_SYSTEM_DATE_TIME" },
-	{ REG_CUSTOM_GRID_CURRENT_A_PHASE, "REG_CUSTOM_GRID_CURRENT_A_PHASE" }
-};
-
-
-
-// These timers are used in the main loop.
-#define RUNSTATE_INTERVAL 5000
-#define STATUS_INTERVAL_TEN_SECONDS 10000
-#define STATUS_INTERVAL_ONE_MINUTE 60000
-#define STATUS_INTERVAL_FIVE_MINUTE 300000
-#define STATUS_INTERVAL_ONE_HOUR 3600000
-#define STATUS_INTERVAL_ONE_DAY 86400000
-#define UPDATE_STATUS_BAR_INTERVAL 500
-
-// Wemos OLED Shield set up. 64x48
-// Pins D1 D2 if ESP8266
-// Pins GPIO22 and GPIO21 (SCL/SDA) with optional reset on GPIO13 if ESP32
-Adafruit_SSD1306 _display(-1); // No RESET Pin
-
-
-
-
-/*
-setup
-
-The setup function runs once when you press reset or power the board
-*/
-void setup()
-{
-
-	// All for testing different baud rates to 'wake up' the inverter
-	unsigned long knownBaudRates[7] = { 115200, 57600, 38400, 19200, 14400, 9600, 4800 };
-	bool gotResponse = false;
-	modbusRequestAndResponseStatusValues result = modbusRequestAndResponseStatusValues::preProcessing;
-	modbusRequestAndResponse response;
-	char baudRateString[10] = "";
-	int baudRateIterator = -1;
-	bool firstCheck = true;
-
-
-
-	// Set up serial for debugging using an appropriate baud rate
-	// This is for communication with the development environment, NOT the Alpha system
-	// See Definitions.h for this.
-	Serial.begin(9600);
-
-
-	// Configure LED for output
-	pinMode(LED_BUILTIN, OUTPUT);
-	
-	// Display time
-	_display.begin(SSD1306_SWITCHCAPVCC, 0x3C);  // initialize OLED with the I2C addr 0x3C (for the 64x48)
-	_display.clearDisplay();
-	_display.display();
-	updateOLED(false, "", "", _version);
-
-
-
-	// Bit of a delay to give things time to kick in
-	delay(100);
-
-
-	// Configure WIFI
-	setupWifi();
-
-	// Configure MQTT to the address and port specified above
-	_mqtt.setServer(MQTT_SERVER, MQTT_PORT);
-#ifdef DEBUG
-	sprintf(_debugOutput, "About to request buffer");
-	Serial.println(_debugOutput);
-#endif
-	for (_bufferSize = (MAX_MQTT_PAYLOAD_SIZE + MQTT_HEADER_SIZE); _bufferSize >= MIN_MQTT_PAYLOAD_SIZE + MQTT_HEADER_SIZE; _bufferSize = _bufferSize - 1024)
-	{
-#ifdef DEBUG
-		sprintf(_debugOutput, "Requesting a buffer of : %d bytes", _bufferSize);
-		Serial.println(_debugOutput);
-#endif
-
-		if (_mqtt.setBufferSize(_bufferSize))
-		{
-			
-			_maxPayloadSize = _bufferSize - MQTT_HEADER_SIZE;
-#ifdef DEBUG
-			sprintf(_debugOutput, "_bufferSize: %d,\r\n\r\n_maxPayload (Including null terminator): %d", _bufferSize, _maxPayloadSize);
-			Serial.println(_debugOutput);
-#endif
-			
-			// Example, 2048, if declared as 2048 is positions 0 to 2047, and position 2047 needs to be zero.  2047 usable chars in payload.
-			_mqttPayload = new char[_maxPayloadSize];
-			emptyPayload();
-
-			break;
-		}
-		else
-		{
-#ifdef DEBUG
-			sprintf(_debugOutput, "Coudln't allocate buffer of %d bytes", _bufferSize);
-			Serial.println(_debugOutput);
-#endif
-		}
-	}
-	
-
-	// And any messages we are subscribed to will be pushed to the mqttCallback function for processing
-	_mqtt.setCallback(mqttCallback);
-
-
-
-
-	// Set up the serial for communicating with the MAX
-	_modBus = new RS485Handler;
-	_modBus->setDebugOutput(_debugOutput);
-
-	// Set up the helper class for reading with reading registers
-	_registerHandler = new RegisterHandler(_modBus);
-
-	// Iterate known baud rates until we find a success
-	while (!gotResponse)
-	{
-		// Starts at -1, so increment to 0 for example
-		baudRateIterator++;
-
-		// Go back to zero if beyond the bounds
-		if (baudRateIterator > (sizeof(knownBaudRates) / sizeof(knownBaudRates[0])) - 1)
-		{
-			baudRateIterator = 0;
-		}
-
-		// Update the display
-		sprintf(baudRateString, "%u", knownBaudRates[baudRateIterator]);
-
-		updateOLED(false, "Test Baud", baudRateString, "");
-#ifdef DEBUG
-		sprintf(_debugOutput, "About To Try: %u", knownBaudRates[baudRateIterator]);
-		Serial.println(_debugOutput);
-#endif
-		// Set the rate
-		_modBus->setBaudRate(knownBaudRates[baudRateIterator]);
-
-		// Ask for a reading
-		result = _registerHandler->readHandledRegister(REG_SAFETY_TEST_RW_GRID_REGULATION, &response);
-		if (result != modbusRequestAndResponseStatusValues::readDataRegisterSuccess)
-		{
-#ifdef DEBUG
-			sprintf(_debugOutput, "Baud Rate Checker Problem: %s", response.statusMqttMessage);
-			Serial.println(_debugOutput);
-#endif
-			updateOLED(false, "Test Baud", baudRateString, response.displayMessage);
-
-			// Delay a while before trying the next
-			delay(1000);
-		}
-		else
-		{
-			// Excellent, baud rate is set in the class, we got a response.. get out of here
-			gotResponse = true;
-		}
-	}
-
-	// Get the serial number (especially prefix for error codes)
-	getSerialNumber();
-
-	// Connect to MQTT
-	mqttReconnect();
-
-	updateOLED(false, "", "", _version);
+Alpha::Alpha(Adafruit_SSD1306* disp, RegisterHandler* _regHandler,PubSubClient* mqtt){
+	_display =  disp;
+	_registerHandler =  _regHandler;
+	_mqtt = mqtt;
 }
-
-
-
-
 /*
-loop
+emptyPayload
 
-The loop function runs overand over again until power down or reset
+Clears every char so end of string can be easily found
 */
-void loop()
+void Alpha::emptyPayload()
 {
-	static unsigned long autoReboot = 0;
-
-	// Refresh LED Screen, will cause the status asterisk to flicker
-	updateOLED(true, "", "", "");
-
-	// Make sure WiFi is good
-	if (WiFi.status() != WL_CONNECTED)
+	for (int i = 0; i < _maxPayloadSize; i++)
 	{
-		setupWifi();
+		_mqttPayload[i] = '\0';
 	}
-
-	// make sure mqtt is still connected
-	if ((!_mqtt.connected()) || !_mqtt.loop())
-	{
-		mqttReconnect();
-	}
-
-	// Check and display the runstate on the display
-	updateRunstate();
-
-	// Read and transmit all configured data to MQTT
-	sendData();
-
-	
-	// Force Restart?
-#ifdef FORCE_RESTART
-	if (checkTimer(&autoReboot, FORCE_RESTART_HOURS * 60 * 60 * 1000))
-	{
-		ESP.restart();
-	}
-#endif
-
-
 }
-
-
-
-
-
-/*
-setupWifi
-
-Connect to WiFi
-*/
-void setupWifi()
-{
-	// We start by connecting to a WiFi network
-#ifdef DEBUG
-	sprintf(_debugOutput, "Connecting to %s", WIFI_SSID);
-	Serial.println(_debugOutput);
-#endif
-
-	// Set up in Station Mode - Will be connecting to an access point
-	WiFi.mode(WIFI_STA);
-
-	// And connect to the details defined at the top
-	WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-	// And continually try to connect to WiFi.  If it doesn't, the device will just wait here before continuing
-	while (WiFi.status() != WL_CONNECTED)
-	{
-		delay(250);
-		updateOLED(false, "Connecting", "WiFi...", _version);
-	}
-
-	// Set the hostname for this Arduino
-	WiFi.hostname(DEVICE_NAME);
-
-	// Output some debug information
-#ifdef DEBUG
-	Serial.print("WiFi connected, IP is");
-	Serial.print(WiFi.localIP());
-#endif
-
-	// Connected, so ditch out with blank screen
-	updateOLED(false, "", "", _version);
-}
-
-
 
 
 /*
@@ -635,7 +48,7 @@ Check to see if the elapsed interval has passed since the passed in millis() val
 Note that millis() overflows after 50 days, so we need to deal with that too... in our case we just zero the last run, which means the timer
 could be shorter but it's not critical... not worth the extra effort of doing it properly for once in 50 days.
 */
-bool checkTimer(unsigned long *lastRun, unsigned long interval)
+bool Alpha::checkTimer(unsigned long *lastRun, unsigned long interval)
 {
 	unsigned long now = millis();
 
@@ -651,21 +64,22 @@ bool checkTimer(unsigned long *lastRun, unsigned long interval)
 	return false;
 }
 
+
 /*
 updateOLED
 
 Update the OLED. Use "NULL" for no change to a line or "" for an empty line.
 Three parameters representing each of the three lines available for status indication - Top line functionality fixed
 */
-void updateOLED(bool justStatus, const char* line2, const char* line3, const char* line4)
+void Alpha::updateOLED(bool justStatus, const char* line2, const char* line3, const char* line4)
 {
 	static unsigned long updateStatusBar = 0;
 
 
-	_display.clearDisplay();
-	_display.setTextSize(1);
-	_display.setTextColor(WHITE);
-	_display.setCursor(0, 0);
+	_display->clearDisplay();
+	_display->setTextSize(1);
+	_display->setTextColor(WHITE);
+	_display->setCursor(0, 0);
 
 	char line1Contents[OLED_CHARACTER_WIDTH];
 	char line2Contents[OLED_CHARACTER_WIDTH];
@@ -713,57 +127,69 @@ void updateOLED(bool justStatus, const char* line2, const char* line3, const cha
 	}
 
 	// There's ten characters we can play with, width wise.
-	sprintf(line1Contents, "%s%c%c%c", "A2M    ", _oledOperatingIndicator, (WiFi.status() == WL_CONNECTED ? 'W' : ' '), (_mqtt.connected() && _mqtt.loop() ? 'M' : ' ') );
-	_display.println(line1Contents);
-
-
+	sprintf(line1Contents, "%s%c%c%c", "A2M    ", _oledOperatingIndicator, (WiFi.status() == WL_CONNECTED ? 'W' : ' '), (_mqtt->connected() && _mqtt->loop() ? 'M' : ' ') );
+	_display->println(line1Contents);
 
 
 	// Next line
 
-	_display.setCursor(0, 12);
+	_display->setCursor(0, 12);
 	if (!justStatus)
 	{
-		_display.println(line2Contents);
+		_display->println(line2Contents);
 		strcpy(_oledLine2, line2Contents);
 	}
 	else
 	{
-		_display.println(_oledLine2);
+		_display->println(_oledLine2);
 	}
 
-
-
-	_display.setCursor(0, 24);
+	_display->setCursor(0, 24);
 	if (!justStatus)
 	{
-		_display.println(line3Contents);
+		_display->println(line3Contents);
 		strcpy(_oledLine3, line3Contents);
 	}
 	else
 	{
-		_display.println(_oledLine3);
+		_display->println(_oledLine3);
 	}
 
-	_display.setCursor(0, 36);
+	_display->setCursor(0, 36);
 	if (!justStatus)
 	{
-		_display.println(line4Contents);
+		_display->println(line4Contents);
 		strcpy(_oledLine4, line4Contents);
 	}
 	else
 	{
-		_display.println(_oledLine4);
+		_display->println(_oledLine4);
 	}
 	// Refresh the display
-	_display.display();
+	_display->display();
 }
 
 
+modbusRequestAndResponseStatusValues Alpha::addToPayload(char* addition)
+{
+	int targetRequestedSize = strlen(_mqttPayload) + strlen(addition);
 
+	// If max payload size is 2048 it is stored as (0-2047), however character 2048  (position 2047) is null terminator so 2047 chars usable usable
+	if (targetRequestedSize > _maxPayloadSize - 1)
+	{
+		// Safely print using snprintf
+		snprintf(_mqttPayload, _maxPayloadSize, "{\r\n    \"mqttError\": \"Length of payload exceeds %d bytes.  Length would be %d bytes.\"\r\n}", _maxPayloadSize - 1, targetRequestedSize);
 
+		return modbusRequestAndResponseStatusValues::payloadExceededCapacity;
+	}
+	else
+	{
+		// Add to the payload by sprintf back on itself with the addition
+		sprintf(_mqttPayload, "%s%s", _mqttPayload, addition);
 
-
+		return modbusRequestAndResponseStatusValues::addedToPayload;
+	}
+}
 
 
 /*
@@ -772,7 +198,7 @@ getSerialNumber
 Display on load to demonstrate connectivty and send the prefix into RegisterHandler as
 some system fault descriptions depend on knowing whether an AL based or AE based inverter.
 */
-modbusRequestAndResponseStatusValues getSerialNumber()
+modbusRequestAndResponseStatusValues Alpha::getSerialNumber()
 {
 	static unsigned long lastRun = 0;
 	modbusRequestAndResponseStatusValues result = modbusRequestAndResponseStatusValues::preProcessing;
@@ -815,6 +241,9 @@ modbusRequestAndResponseStatusValues getSerialNumber()
 	return result;
 }
 
+int Alpha::getMaxPayloadSize(){
+	return _maxPayloadSize;
+}
 
 /*
 updateRunstate
@@ -822,7 +251,7 @@ updateRunstate
 Determines a few things about the sytem and updates the display
 Things updated - Dispatch state discharge/charge, battery power, battery percent
 */
-void updateRunstate()
+void Alpha::updateRunstate()
 {
 	
 	static unsigned long lastRun = 0;
@@ -920,196 +349,7 @@ void updateRunstate()
 
 
 
-
-/*
-mqttReconnect
-
-This function reconnects the ESP8266 to the MQTT broker
-*/
-void mqttReconnect()
-{
-	bool subscribed = false;
-	char subscriptionDef[100];
-
-	// Loop until we're reconnected
-	while (true)
-	{
-
-		_mqtt.disconnect();		// Just in case.
-		delay(200);
-
-#ifdef DEBUG
-		Serial.print("Attempting MQTT connection...");
-#endif
-
-		updateOLED(false, "Connecting", "MQTT...", _version);
-		delay(100);
-
-		// Attempt to connect
-		if (_mqtt.connect(DEVICE_NAME, MQTT_USERNAME, MQTT_PASSWORD))
-		{
-			Serial.println("Connected MQTT");
-
-			sprintf(subscriptionDef, "%s", DEVICE_NAME MQTT_SUB_REQUEST_READ_HANDLED_REGISTER);
-			subscribed = _mqtt.subscribe(subscriptionDef);
-			sprintf(subscriptionDef, "%s", DEVICE_NAME MQTT_SUB_REQUEST_READ_RAW_REGISTER);
-			subscribed = subscribed && _mqtt.subscribe(subscriptionDef);
-			sprintf(subscriptionDef, "%s", DEVICE_NAME MQTT_SUB_REQUEST_SET_CHARGE);
-			subscribed = subscribed && _mqtt.subscribe(subscriptionDef);
-			sprintf(subscriptionDef, "%s", DEVICE_NAME MQTT_SUB_REQUEST_SET_DISCHARGE);
-			subscribed = subscribed && _mqtt.subscribe(subscriptionDef);
-			sprintf(subscriptionDef, "%s", DEVICE_NAME MQTT_SUB_REQUEST_SET_NORMAL);
-			subscribed = subscribed && _mqtt.subscribe(subscriptionDef);
-			sprintf(subscriptionDef, "%s", DEVICE_NAME MQTT_SUB_REQUEST_WRITE_RAW_SINGLE_REGISTER);
-			subscribed = subscribed && _mqtt.subscribe(subscriptionDef);
-			sprintf(subscriptionDef, "%s", DEVICE_NAME MQTT_SUB_REQUEST_WRITE_RAW_DATA_REGISTER);
-			subscribed = subscribed && _mqtt.subscribe(subscriptionDef);
-			sprintf(subscriptionDef, "%s", DEVICE_NAME MQTT_SUB_REQUEST_READ_HANDLED_REGISTER_ALL);
-			subscribed = subscribed && _mqtt.subscribe(subscriptionDef);
-
-			// Subscribe or resubscribe to topics.
-			if (subscribed)
-			{
-				// Connected, so ditch out with runstate on the screen
-				updateRunstate();
-				break;
-			}
-			
-		}
-
-		if (!subscribed)
-#ifdef DEBUG
-		sprintf(_debugOutput, "MQTT Failed: RC is %d\r\nTrying again in five seconds...", _mqtt.state());
-		Serial.println(_debugOutput);
-#endif
-
-		// Wait 5 seconds before retrying
-		delay(5000);
-	}
-}
-
-
-
-
-
-/*
-addStateInfo
-
-Query the handled register in the usual way, and add the cleansed output to the buffer
-*/
-modbusRequestAndResponseStatusValues addStateInfo(uint16_t registerAddress, char* registerName, bool addComma, modbusRequestAndResponseStatusValues& resultAddedToPayload)
-{
-	unsigned int val;
-	char stateAddition[128] = ""; // 128 should cover individual additions to the payload
-	char addQuote = false;
-	modbusRequestAndResponse response;
-	modbusRequestAndResponseStatusValues result = modbusRequestAndResponseStatusValues::preProcessing;
-
-	// Read the register
-	result = _registerHandler->readHandledRegister(registerAddress, &response);
-
-	if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess)
-	{
-		// Add a quote if the return data type is character or has been converted from lookup to description.
-		addQuote = (response.returnDataType == modbusReturnDataType::character || response.hasLookup);
-
-		sprintf(stateAddition, "    \"%s\": %s%s%s%s\r\n", registerName, addQuote ? "\"" : "", response.dataValueFormatted, addQuote ? "\"" : "", addComma ? "," : "");
-
-		/*
-		ABC,
-		1234 LEN
-		0123
-		*/
-
-		// Let the onward process also know if the buffer failed.
-		resultAddedToPayload = addToPayload(stateAddition);
-	}
-	else
-	{
-#ifdef DEBUG
-		sprintf(_debugOutput, "Failed to addStateInfo for: %u, Result was: %d", registerAddress, result);
-		Serial.println(_debugOutput);
-#endif
-	}
-	return result;
-}
-
-
-
-
-modbusRequestAndResponseStatusValues addToPayload(char* addition)
-{
-	int targetRequestedSize = strlen(_mqttPayload) + strlen(addition);
-
-	// If max payload size is 2048 it is stored as (0-2047), however character 2048  (position 2047) is null terminator so 2047 chars usable usable
-	if (targetRequestedSize > _maxPayloadSize - 1)
-	{
-		// Safely print using snprintf
-		snprintf(_mqttPayload, _maxPayloadSize, "{\r\n    \"mqttError\": \"Length of payload exceeds %d bytes.  Length would be %d bytes.\"\r\n}", _maxPayloadSize - 1, targetRequestedSize);
-
-		return modbusRequestAndResponseStatusValues::payloadExceededCapacity;
-	}
-	else
-	{
-		// Add to the payload by sprintf back on itself with the addition
-		sprintf(_mqttPayload, "%s%s", _mqttPayload, addition);
-
-		return modbusRequestAndResponseStatusValues::addedToPayload;
-	}
-}
-
-
-/*
-sendData
-
-Runs once every loop, checks to see if time periods have elapsed to allow the schedules to run.
-Each time, the appropriate arrays are iterated, processed and added to the payload.
-*/
-void sendData()
-{
-	static unsigned long lastRunTenSeconds = 0;
-	static unsigned long lastRunOneMinute = 0;
-	static unsigned long lastRunFiveMinutes = 0;
-	static unsigned long lastRunOneHour = 0;
-	static unsigned long lastRunOneDay = 0;
-	int numberOfRegisters;
-	// Update all parameters and send to MQTT.
-	if (checkTimer(&lastRunTenSeconds, STATUS_INTERVAL_TEN_SECONDS))
-	{
-		numberOfRegisters = sizeof(_mqttTenSecondStatusRegisters) / sizeof(struct mqttState);
-		sendDataFromAppropriateArray(_mqttTenSecondStatusRegisters, numberOfRegisters, DEVICE_NAME MQTT_MES_STATE_SECOND_TEN);
-	}
-
-	// Update all parameters and send to MQTT.
-	if (checkTimer(&lastRunOneMinute, STATUS_INTERVAL_ONE_MINUTE))
-	{
-		numberOfRegisters = sizeof(_mqttOneMinuteStatusRegisters) / sizeof(struct mqttState);
-		sendDataFromAppropriateArray(_mqttOneMinuteStatusRegisters, numberOfRegisters, DEVICE_NAME MQTT_MES_STATE_MINUTE_ONE);
-	}
-
-	// Update all parameters and send to MQTT.
-	if (checkTimer(&lastRunFiveMinutes, STATUS_INTERVAL_FIVE_MINUTE))
-	{
-		numberOfRegisters = sizeof(_mqttFiveMinuteStatusRegisters) / sizeof(struct mqttState);
-		sendDataFromAppropriateArray(_mqttFiveMinuteStatusRegisters, numberOfRegisters, DEVICE_NAME MQTT_MES_STATE_MINUTE_FIVE);
-	}
-
-	// Update all parameters and send to MQTT.
-	if (checkTimer(&lastRunOneHour, STATUS_INTERVAL_ONE_HOUR))
-	{
-		numberOfRegisters = sizeof(_mqttOneHourStatusRegisters) / sizeof(struct mqttState);
-		sendDataFromAppropriateArray(_mqttOneHourStatusRegisters, numberOfRegisters, DEVICE_NAME MQTT_MES_STATE_HOUR_ONE);
-	}
-
-	// Update all parameters and send to MQTT.
-	if (checkTimer(&lastRunOneDay, STATUS_INTERVAL_ONE_DAY))
-	{
-		numberOfRegisters = sizeof(_mqttOneDayStatusRegisters) / sizeof(struct mqttState);
-		sendDataFromAppropriateArray(_mqttOneDayStatusRegisters, numberOfRegisters, DEVICE_NAME MQTT_MES_STATE_DAY_ONE);
-	}
-}
-
-void sendDataFromAppropriateArray(mqttState* registerArray, int numberOfRegisters, char* topic)
+void Alpha::sendDataFromAppropriateArray(mqttState* registerArray, int numberOfRegisters, char* topic)
 {
 	int	l = 0;
 
@@ -1158,11 +398,112 @@ void sendDataFromAppropriateArray(mqttState* registerArray, int numberOfRegister
 
 
 /*
-mqttCallback()
+addStateInfo
+
+Query the handled register in the usual way, and add the cleansed output to the buffer
+*/
+modbusRequestAndResponseStatusValues Alpha::addStateInfo(uint16_t registerAddress, char* registerName, bool addComma, modbusRequestAndResponseStatusValues& resultAddedToPayload)
+{
+	char stateAddition[128] = ""; // 128 should cover individual additions to the payload
+	char addQuote = false;
+	modbusRequestAndResponse response;
+	modbusRequestAndResponseStatusValues result = modbusRequestAndResponseStatusValues::preProcessing;
+
+	// Read the register
+	result = _registerHandler->readHandledRegister(registerAddress, &response);
+
+	if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess)
+	{
+		// Add a quote if the return data type is character or has been converted from lookup to description.
+		addQuote = (response.returnDataType == modbusReturnDataType::character || response.hasLookup);
+
+		sprintf(stateAddition, "    \"%s\": %s%s%s%s\r\n", registerName, addQuote ? "\"" : "", response.dataValueFormatted, addQuote ? "\"" : "", addComma ? "," : "");
+
+		/*
+		ABC,
+		1234 LEN
+		0123
+		*/
+
+		// Let the onward process also know if the buffer failed.
+		resultAddedToPayload = addToPayload(stateAddition);
+	}
+	else
+	{
+#ifdef DEBUG
+		sprintf(_debugOutput, "Failed to addStateInfo for: %u, Result was: %d", registerAddress, result);
+		Serial.println(_debugOutput);
+#endif
+	}
+	return result;
+}
+
+
+/*
+sendData
+
+Runs once every loop, checks to see if time periods have elapsed to allow the schedules to run.
+Each time, the appropriate arrays are iterated, processed and added to the payload.
+*/
+void Alpha::sendData()
+{
+	static unsigned long lastRunTenSeconds = 0;
+	static unsigned long lastRunOneMinute = 0;
+	static unsigned long lastRunFiveMinutes = 0;
+	static unsigned long lastRunOneHour = 0;
+	static unsigned long lastRunOneDay = 0;
+	int numberOfRegisters;
+	// Update all parameters and send to MQTT.
+	if (checkTimer(&lastRunTenSeconds, STATUS_INTERVAL_TEN_SECONDS))
+	{
+		numberOfRegisters = sizeof(_mqttTenSecondStatusRegisters) / sizeof(struct mqttState);
+		sendDataFromAppropriateArray(_mqttTenSecondStatusRegisters, numberOfRegisters, DEVICE_NAME MQTT_MES_STATE_SECOND_TEN);
+	}
+
+	// Update all parameters and send to MQTT.
+	if (checkTimer(&lastRunOneMinute, STATUS_INTERVAL_ONE_MINUTE))
+	{
+		numberOfRegisters = sizeof(_mqttOneMinuteStatusRegisters) / sizeof(struct mqttState);
+		sendDataFromAppropriateArray(_mqttOneMinuteStatusRegisters, numberOfRegisters, DEVICE_NAME MQTT_MES_STATE_MINUTE_ONE);
+	}
+
+	// Update all parameters and send to MQTT.
+	if (checkTimer(&lastRunFiveMinutes, STATUS_INTERVAL_FIVE_MINUTE))
+	{
+		numberOfRegisters = sizeof(_mqttFiveMinuteStatusRegisters) / sizeof(struct mqttState);
+		sendDataFromAppropriateArray(_mqttFiveMinuteStatusRegisters, numberOfRegisters, DEVICE_NAME MQTT_MES_STATE_MINUTE_FIVE);
+	}
+
+	// Update all parameters and send to MQTT.
+	if (checkTimer(&lastRunOneHour, STATUS_INTERVAL_ONE_HOUR))
+	{
+		numberOfRegisters = sizeof(_mqttOneHourStatusRegisters) / sizeof(struct mqttState);
+		sendDataFromAppropriateArray(_mqttOneHourStatusRegisters, numberOfRegisters, DEVICE_NAME MQTT_MES_STATE_HOUR_ONE);
+	}
+
+	// Update all parameters and send to MQTT.
+	if (checkTimer(&lastRunOneDay, STATUS_INTERVAL_ONE_DAY))
+	{
+		numberOfRegisters = sizeof(_mqttOneDayStatusRegisters) / sizeof(struct mqttState);
+		sendDataFromAppropriateArray(_mqttOneDayStatusRegisters, numberOfRegisters, DEVICE_NAME MQTT_MES_STATE_DAY_ONE);
+	}
+}
+
+void Alpha::setMqttPayload(char* payload){
+	_mqttPayload = payload;
+}
+
+char* Alpha::getMqttPayload(){
+	return _mqttPayload ;
+}
+
+void Alpha::setMaxPayloadSize(int maxPayloadSize){
+	_maxPayloadSize = maxPayloadSize;
+} 
 
 // This function is executed when an MQTT message arrives on a topic that we are subscribed to.
-*/
-void mqttCallback(char* topic, byte* message, unsigned int length)
+
+void Alpha::mqttCallback(char* topic, byte* message, unsigned int length)
 {
 	modbusRequestAndResponseStatusValues result = modbusRequestAndResponseStatusValues::preProcessing;
 	modbusRequestAndResponse response;
@@ -1900,19 +1241,79 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 	return;
 }
 
+// mqttReconnect
+/**
+	This function reconnects the ESP8266 to the MQTT broker
+**/
+void Alpha::mqttReconnect()
+{
+	bool subscribed = false;
+	char subscriptionDef[100];
 
-/*
-sendMqtt
+	// Loop until we're reconnected
+	while (true)
+	{
 
-Sends whatever is in the modular level payload to the specified topic.
-*/
-void sendMqtt(char *topic)
+		_mqtt->disconnect();		// Just in case.
+		delay(200);
+
+#ifdef DEBUG
+		Serial.print("Attempting MQTT connection...");
+#endif
+
+		updateOLED(false, "Connecting", "MQTT...", _version);
+		delay(100);
+
+		// Attempt to connect
+		if (_mqtt->connect(DEVICE_NAME, MQTT_USERNAME, MQTT_PASSWORD))
+		{
+			Serial.println("Connected MQTT");
+
+			sprintf(subscriptionDef, "%s", DEVICE_NAME MQTT_SUB_REQUEST_READ_HANDLED_REGISTER);
+			subscribed = _mqtt->subscribe(subscriptionDef);
+			sprintf(subscriptionDef, "%s", DEVICE_NAME MQTT_SUB_REQUEST_READ_RAW_REGISTER);
+			subscribed = subscribed && _mqtt->subscribe(subscriptionDef);
+			sprintf(subscriptionDef, "%s", DEVICE_NAME MQTT_SUB_REQUEST_SET_CHARGE);
+			subscribed = subscribed && _mqtt->subscribe(subscriptionDef);
+			sprintf(subscriptionDef, "%s", DEVICE_NAME MQTT_SUB_REQUEST_SET_DISCHARGE);
+			subscribed = subscribed && _mqtt->subscribe(subscriptionDef);
+			sprintf(subscriptionDef, "%s", DEVICE_NAME MQTT_SUB_REQUEST_SET_NORMAL);
+			subscribed = subscribed && _mqtt->subscribe(subscriptionDef);
+			sprintf(subscriptionDef, "%s", DEVICE_NAME MQTT_SUB_REQUEST_WRITE_RAW_SINGLE_REGISTER);
+			subscribed = subscribed && _mqtt->subscribe(subscriptionDef);
+			sprintf(subscriptionDef, "%s", DEVICE_NAME MQTT_SUB_REQUEST_WRITE_RAW_DATA_REGISTER);
+			subscribed = subscribed && _mqtt->subscribe(subscriptionDef);
+			sprintf(subscriptionDef, "%s", DEVICE_NAME MQTT_SUB_REQUEST_READ_HANDLED_REGISTER_ALL);
+			subscribed = subscribed && _mqtt->subscribe(subscriptionDef);
+
+			// Subscribe or resubscribe to topics.
+			if (subscribed)
+			{
+				// Connected, so ditch out with runstate on the screen
+				updateRunstate();
+				break;
+			}
+		
+		}
+
+		if (!subscribed)
+#ifdef DEBUG
+		sprintf(_debugOutput, "MQTT Failed: RC is %d\r\nTrying again in five seconds...", _mqtt->state());
+		Serial.println(_debugOutput);
+#endif
+
+		// Wait 5 seconds before retrying
+		delay(5000);
+	}
+}
+
+void Alpha::sendMqtt(char *topic)
 {
 	// Attempt a send
-	if (!_mqtt.publish(topic, _mqttPayload))
+	if (!_mqtt->publish(topic, _mqttPayload))
 	{
 #ifdef DEBUG
-		sprintf(_debugOutput, "MQTT publish failed to %s", topic);
+		//sprintf(_debugOutput, "MQTT publish failed to %s", topic);
 		Serial.println(_debugOutput);
 		Serial.println(_mqttPayload);
 #endif
@@ -1929,25 +1330,3 @@ void sendMqtt(char *topic)
 	emptyPayload();
 	return;
 }
-
-/*
-emptyPayload
-
-Clears every char so end of string can be easily found
-*/
-void emptyPayload()
-{
-	for (int i = 0; i < _maxPayloadSize; i++)
-	{
-		_mqttPayload[i] = '\0';
-	}
-}
-
-
-/*
-uint32_t freeMemory()
-{
-
-	return ESP.getFreeHeap();
-}
-*/

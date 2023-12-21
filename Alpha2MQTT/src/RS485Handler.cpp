@@ -26,8 +26,11 @@ RS485Handler::RS485Handler()
 	//digitalWrite(SERIAL_COMMUNICATION_CONTROL_PIN, RS485_RX);
 
 #if defined MP_ESP8266
-	_RS485Serial = new SoftwareSerial(RX_PIN, TX_PIN);
-	_RS485Serial->begin(DEFAULT_BAUD_RATE, SWSERIAL_8N1);
+	_RS485Serial = new EspSoftwareSerial::UART(RX_PIN, TX_PIN);//	,false);
+	_RS485Serial->begin(DEFAULT_BAUD_RATE, SWSERIAL_8N1);//, RX_PIN,TX_PIN, false);
+
+	
+	// _RS485Serial->begin(DEFAULT_BAUD_RATE);// alt: , SWSERIAL_8N1);
 #elif defined MP_ESP32
 	_RS485Serial = new HardwareSerial(2); // Serial 2 PIN16=RXgreen, pin17=TXwhite
 	_RS485Serial->begin(DEFAULT_BAUD_RATE, SERIAL_8N1);

@@ -21,8 +21,11 @@ Handles Modbus requests and responses in a tidy class separate from main program
 
 #include "Definitions.h"
 
+#include "SoftwareSerial.h"
+
 #if defined MP_ESP8266
-#include <SoftwareSerial.h>
+//#include <SoftwareSerial.h>
+//#include <AltSoftSerial.h>
 #elif defined MP_ESP32
 #include <HardwareSerial.h>
 #endif
@@ -49,7 +52,11 @@ class RS485Handler
 
 	private:
 #if defined MP_ESP8266
-		SoftwareSerial* _RS485Serial;
+		///SoftwareSerial* _RS485Serial;
+		EspSoftwareSerial::UART*  _RS485Serial;
+
+		//AltSoftSerial* _RS485Serial;
+
 #elif defined MP_ESP32
 		HardwareSerial* _RS485Serial;
 #endif

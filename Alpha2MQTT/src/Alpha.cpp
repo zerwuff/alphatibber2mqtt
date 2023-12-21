@@ -12,7 +12,8 @@
 
   // Buffer Size (and therefore payload size calc)
     static int _maxPayloadSize;
-    static char* _mqttPayload;
+    char* _mqttPayload;//[MAX_MQTT_PAYLOAD_SIZE] = "";
+
     static PubSubClient* _mqtt;
     static Adafruit_SSD1306* _display;
     static RegisterHandler* _registerHandler ;
@@ -178,7 +179,7 @@ modbusRequestAndResponseStatusValues Alpha::addToPayload(char* addition)
 	if (targetRequestedSize > _maxPayloadSize - 1)
 	{
 		// Safely print using snprintf
-		snprintf(_mqttPayload, _maxPayloadSize, "{\r\n    \"mqttError\": \"Length of payload exceeds %d bytes.  Length would be %d bytes.\"\r\n}", _maxPayloadSize - 1, targetRequestedSize);
+		snprintf(_mqttPayload, _maxPayloadSize, "{\	r\n    \"mqttError\": \"Length of payload exceeds %d bytes.  Length would be %d bytes.\"\r\n}", _maxPayloadSize - 1, targetRequestedSize);
 
 		return modbusRequestAndResponseStatusValues::payloadExceededCapacity;
 	}
@@ -489,9 +490,10 @@ void Alpha::sendData()
 	}
 }
 
-void Alpha::setMqttPayload(char* payload){
-	_mqttPayload = payload;
+void Alpha::setMqttPayload(int newMaxPayloadSize){
+	_mqttPayload = new char[newMaxPayloadSize];
 }
+
 
 char* Alpha::getMqttPayload(){
 	return _mqttPayload ;
@@ -1250,6 +1252,8 @@ void Alpha::mqttReconnect()
 	bool subscribed = false;
 	char subscriptionDef[100];
 
+	_mqtt->setServer(MQTT_SERVER, MQTT_PORT);
+
 	// Loop until we're reconnected
 	while (true)
 	{
@@ -1267,7 +1271,7 @@ void Alpha::mqttReconnect()
 		// Attempt to connect
 		if (_mqtt->connect(DEVICE_NAME, MQTT_USERNAME, MQTT_PASSWORD))
 		{
-			Serial.println("Connected MQTT");
+			Serial.println("Connected MQTT, trying to subscribe topics");
 
 			sprintf(subscriptionDef, "%s", DEVICE_NAME MQTT_SUB_REQUEST_READ_HANDLED_REGISTER);
 			subscribed = _mqtt->subscribe(subscriptionDef);
@@ -1289,6 +1293,8 @@ void Alpha::mqttReconnect()
 			// Subscribe or resubscribe to topics.
 			if (subscribed)
 			{
+				Serial.println("Subscribed, update runstate");
+
 				// Connected, so ditch out with runstate on the screen
 				updateRunstate();
 				break;

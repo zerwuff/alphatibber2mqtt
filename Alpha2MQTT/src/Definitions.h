@@ -43,14 +43,14 @@ Customise these options as per README.txt.  Please read README.txt before contin
 #define LEGACY_CALCULATIONS false
 
 // Update with your Wifi details
-#define WIFI_SSID		""
-#define WIFI_PASSWORD	""
+#define WIFI_SSID		"wuppb"
+#define WIFI_PASSWORD	"bilder1234567"
 
 // Update with your MQTT Broker details
 #define MQTT_SERVER	"192.168.1.199"
 #define MQTT_PORT	1883
-#define MQTT_USERNAME	""			// Empty string for none.
-#define MQTT_PASSWORD	""
+#define MQTT_USERNAME	"noususer"			// Empty string for none.
+#define MQTT_PASSWORD	"noususer"
 
 // The device name is used as the MQTT base topic and presence on the network.
 // If you need more than one Alpha2MQTT on your network, give them unique names.
@@ -70,7 +70,9 @@ Customise these options as per README.txt.  Please read README.txt before contin
 // At 4096 (4095 usable) you can request up to around 70 to 80 registers on a schedule or by request.
 // Alpha2MQTT on boot will request a buffer size of (MAX_MQTT_PAYLOAD_SIZE + MQTT_HEADER_SIZE) for MQTT, and
 // MAX_MQTT_PAYLOAD_SIZE for building payloads.  If these fail and your device doesn't boot, you can assume you've set this too high.
-#define MAX_MQTT_PAYLOAD_SIZE 4096
+#define MAX_MQTT_PAYLOAD_SIZE 1024 
+//#define MAX_MQTT_PAYLOAD_SIZE 4096 
+
 #define MIN_MQTT_PAYLOAD_SIZE 512
 #define MQTT_HEADER_SIZE 512
 

@@ -31,9 +31,7 @@ First, go and customise options at the top of Definitions.h!
 #include <Adafruit_SSD1306.h>
 #include <ESP8266WiFi.h>
 #include "webrender.h"
-#include <ArduinoOTA.h>
-#include <WiFiUdp.h>
-
+#include "trigger/trigger.h"
 
 const char* ssid = "wuppb" ;
 const char* password = "bilder1234567";
@@ -51,8 +49,6 @@ PubSubClient _mqtt(_wifi);
 unsigned long lastTime = 0;
 unsigned long timerDelay = 30000;
 
-//ArduinoOTA ota;
-
 // I want to declare this once at a modular level, keep the heap somewhere in check.
 //char _mqttPayload[MAX_MQTT_PAYLOAD_SIZE] = "";
 
@@ -61,13 +57,13 @@ unsigned long timerDelay = 30000;
 // to keep separate from the main program logic.
 RS485Handler* _modBus;
 RegisterHandler* _registerHandler;
-WebRender* webRender;
-
+//WebRender* webRender;
+//Trigger* trigger;
 
 // Wemos OLED Shield set up. 64x48
 // Pins D1 D2 if ESP8266
 // Pins GPIO22 and GPIO21 (SCL/SDA) with optional reset on GPIO13 if ESP32
-Adafruit_SSD1306 _display(-1); // No RESET Pin
+Adafruit_SSD1306 _display(-1);//, &Wire,-1); // No RESET Pin
 Alpha alpha(&_display,_registerHandler,&_mqtt);
 
 char _debugOutput[100];
@@ -84,6 +80,8 @@ setupWifi Connect to WiFi
 */
 void setupWifi()
 {
+	sprintf(_debugOutput, "Free Memory : %d bytes", freeMemory());
+	Serial.println(_debugOutput);
 	// We start by connecting to a WiFi network
 #ifdef DEBUG
 	sprintf(_debugOutput, "Connecting to %s", WIFI_SSID);
@@ -119,19 +117,12 @@ void setupWifi()
 
 
 
-
-void doOTA() {
-  // start the WiFi OTA library with internal (flash) based storage
-  ArduinoOTA.begin(WiFi.localIP(), "Arduino", "password", InternalStorage);
-}
-
-
-
-
-
 void doSerialConnect(){
 		// All for testing different baud rates to 'wake up' the inverter
-	unsigned long knownBaudRates[7] = { 115200, 57600, 38400, 19200, 14400, 9600, 4800 };
+	unsigned long knownBaudRates[7] = { 115200,  57600, 38400, 19200, 14400,  9600, 4800 };
+
+	//unsigned long knownBaudRates[2] = { 9600, 4800 };
+
 	bool gotResponse = false;
 	modbusRequestAndResponseStatusValues result = modbusRequestAndResponseStatusValues::preProcessing;
 	modbusRequestAndResponse response;
@@ -166,18 +157,26 @@ void doSerialConnect(){
 			Serial.println(_debugOutput);
 #endif
 			
-			Serial.println("free memory " + freeMemory());
+
 
 			// Example, 2048, if declared as 2048 is positions 0 to 2047, and position 2047 needs to be zero.  2047 usable chars in payload.		
-			alpha.setMqttPayload(new char[_maxPayloadSize]);
+			
+			// Example, 2048, if declared as 2048 is positions 0 to 2047, and position 2047 needs to be zero.  2047 usable chars in payload.
+			//_mqttPayload = new char[_maxPayloadSize];
+			//emptyPayload();
+
 			alpha.setMaxPayloadSize(_maxPayloadSize);
+			alpha.setMqttPayload(_maxPayloadSize);
 			alpha.emptyPayload();
+
+			sprintf(_debugOutput, "Requested Buffer. Free Memory : %d bytes", freeMemory());
+			Serial.println(_debugOutput);
 			break;
 		}
 		else
 		{
 #ifdef DEBUG
-			sprintf(_debugOutput, "Coudln't allocate buffer of %d bytes", _bufferSize);
+			sprintf(_debugOutput, "Couldn't allocate buffer of %d bytes for mqtt buffer", _bufferSize);
 			Serial.println(_debugOutput);
 #endif
 		}
@@ -191,11 +190,12 @@ void doSerialConnect(){
 	// Set up the serial for communicating with the MAX
 	_modBus = new RS485Handler;
 	_modBus->setDebugOutput(_debugOutput);
-
 	// Set up the helper class for reading with reading registers
 	_registerHandler = new RegisterHandler(_modBus);
 
 	// Iterate known baud rates until we find a success
+	
+
 	while (!gotResponse)
 	{
 		// Starts at -1, so increment to 0 for example
@@ -210,13 +210,15 @@ void doSerialConnect(){
 		// Update the display
 		sprintf(baudRateString, "%u", knownBaudRates[baudRateIterator]);
 
-		alpha.updateOLED(false, "Test Baud", baudRateString, "");
+		alpha.updateOLED(false, "Test Bau1", baudRateString, "");
 #ifdef DEBUG
-		sprintf(_debugOutput, "About To Try: %u", knownBaudRates[baudRateIterator]);
+		sprintf(_debugOutput, "About To Try Baud rate : %u", knownBaudRates[baudRateIterator]);
 		Serial.println(_debugOutput);
 #endif
 		// Set the rate
 		_modBus->setBaudRate(knownBaudRates[baudRateIterator]);
+
+		alpha.updateOLED(false, "BR Set: ", baudRateString, "");
 
 		// Ask for a reading
 		result = _registerHandler->readHandledRegister(REG_SAFETY_TEST_RW_GRID_REGULATION, &response);
@@ -226,7 +228,7 @@ void doSerialConnect(){
 			sprintf(_debugOutput, "Baud Rate Checker Problem: %s", response.statusMqttMessage);
 			Serial.println(_debugOutput);
 #endif
-			alpha.updateOLED(false, "Test Baud", baudRateString, response.displayMessage);
+			alpha.updateOLED(false, "Test Bau2", baudRateString, response.displayMessage);
 
 			// Delay a while before trying the next
 			delay(10000);
@@ -255,8 +257,8 @@ The loop function runs overand over again until power down or reset
 void loop()
 {
 
-//	ArduinoOTA.poll();
-
+	Serial.println("Begin Loop");
+	
 	// Refresh LED Screen, will cause the status asterisk to flicker
 	alpha.updateOLED(true, "", "", "");
 
@@ -266,17 +268,23 @@ void loop()
 		setupWifi();
 	}
 
-	// make sure mqtt is still connected
-	if ((!_mqtt.connected()) || !_mqtt.loop())
-	{
+	Serial.println("free memory: ");
+	Serial.print(freeMemory());
+	
+	
+	 // make sure mqtt is still connected
+	 if ((!_mqtt.connected()) || !_mqtt.loop())
+	 {
+		Serial.println("free memory, doing some reconnect: ");
+		Serial.print(freeMemory());
 		alpha.mqttReconnect();
-	}
+	 }
 
-	// Check and display the runstate on the display
-	alpha.updateRunstate();
+	 // Check and display the runstate on the display
+	 alpha.updateRunstate();
 
-	// Read and transmit all configured data to MQTT
-	alpha.sendData();
+	 // Read and transmit all configured data to MQTT
+	 alpha.sendData();
 
 	
 	// Force Restart?
@@ -307,6 +315,9 @@ void setup()
 	// Configure LED for output
 	pinMode(LED_BUILTIN, OUTPUT);
 	
+	sprintf(_debugOutput, "Free Memory : %d bytes", freeMemory());
+	Serial.println(_debugOutput);
+
 	// Display time
 	_display.begin(SSD1306_SWITCHCAPVCC, 0x3C);  // initialize OLED with the I2C addr 0x3C (for the 64x48)
 	_display.clearDisplay();
@@ -320,19 +331,27 @@ void setup()
 
 	// Configure WIFI
 	setupWifi();
+	Serial.println("Setup Wifi Done.");
 
+	sprintf(_debugOutput, "Free Memory : %d bytes", freeMemory());
+	Serial.println(_debugOutput);
 
-	delay(100);
+	//trigger = new Trigger;
+    //webRender = new WebRender;
+    
+	Serial.println("Setup WebRenderer Done.");
+	
+	sprintf(_debugOutput, "Free Memory : %d bytes", freeMemory());
+	Serial.println(_debugOutput);
 
-    webRender = new WebRender;
-    webRender->setupWebInterface();
+	//webRender->setTrigger(trigger);
+	//webRender->setupWebInterface();
+	
+	Serial.println("Setup WebInterface  Done.");
 
 	delay(1000);
 
-	//doOTA();
-
-	//doSerialConnect();
-
+	doSerialConnect();
 }
 
 

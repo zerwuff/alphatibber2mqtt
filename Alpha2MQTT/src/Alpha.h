@@ -21,14 +21,14 @@ class Alpha
 
     static void updateRunstate();
     static int getMaxPayloadSize();
-    void setMaxPayloadSize(int maxPayloadSize);
+    static void setMaxPayloadSize(int maxPayloadSize);
 
     static modbusRequestAndResponseStatusValues getSerialNumber();
     static modbusRequestAndResponseStatusValues addToPayload(char* addition);
     static  modbusRequestAndResponseStatusValues addStateInfo(uint16_t registerAddress, char* registerName, bool addComma, modbusRequestAndResponseStatusValues& resultAddedToPayload);
 
     static char* getMqttPayload();
-    static void setMqttPayload(char* payload);
+    static void setMqttPayload(int maxPayloadSize);
     static void sendData();
     static void sendMqtt(char *topic);
     static void sendDataFromAppropriateArray(mqttState* registerArray, int numberOfRegisters, char* topic);
